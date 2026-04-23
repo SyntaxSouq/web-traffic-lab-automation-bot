@@ -44,9 +44,7 @@ function App() {
     setProgress(progressRef.current);
     
     try {
-      const apiUrl = import.meta.env.PROD 
-        ? '/api/automate' 
-        : 'http://localhost:3005/api/automate';
+      const apiUrl = '/api/automate';
         
       const res = await fetch(apiUrl, {
         method: 'POST',

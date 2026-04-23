@@ -79,6 +79,7 @@ function App() {
             if (part.startsWith('data: ')) {
               try {
                 const data = JSON.parse(part.slice(6));
+                console.log('📡 Received SSE:', data.type, data);
                 if (data.type === 'progress') {
                   const newProgress = {
                     completed: data.completed,
@@ -88,6 +89,7 @@ function App() {
                     totalLoops: data.totalLoops
                   };
                   progressRef.current = newProgress;
+                  console.log('✅ Updating progress:', newProgress);
                   setProgress(newProgress);
                 } else if (data.type === 'result') {
                   const resultData = data.data;

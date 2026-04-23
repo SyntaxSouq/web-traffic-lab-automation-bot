@@ -809,12 +809,24 @@ async function automateWebsite(url, options = {}, onProgress = null) {
   for (let l = 1; l <= loopCount; l++) {
     console.log(`\n🔄 LOOP ${l} of ${loopCount} starting...`);
     
+    // Track progress within this loop
+    let loopCompleted = 0;
+    let loopSuccessful = 0;
+    let loopFailed = 0;
+    
     // Create a specific progress wrapper for this loop to track global progress
     const loopOnProgress = (loopProgress) => {
+      // Update loop tracking
+      loopCompleted = (loopProgress.completed || 0) + (loopProgress.failed || 0);
+      loopSuccessful = loopProgress.completed || 0;
+      loopFailed = loopProgress.failed || 0;
+      
       if (onProgress) {
-        const globalCompleted = allSuccesses + allFailures + (loopProgress.completed || 0);
+        // Calculate global progress: previous loops + current loop
+        const previousLoopsVisits = totalVisitsPerLoop * (l - 1);
+        const globalCompleted = previousLoopsVisits + loopCompleted;
         const globalRemaining = (totalVisitsPerLoop * (loopCount - l)) + (loopProgress.remaining || 0);
-        const globalFailed = allFailures + (loopProgress.failed || 0);
+        const globalFailed = allFailures + loopFailed;
         
         onProgress({
           completed: globalCompleted,
@@ -1118,10 +1130,11 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
   
   try {
     const visitCount = Number.isInteger(options.visitCount) ? options.visitCount : 1;
-    const maxBatchVisits = Number.isInteger(options.maxBatchVisits) ? options.maxBatchVisits : 20;
+    // FIXED: Reduced default batch size from 20 to 10 to prevent memory overflow
+    const maxBatchVisits = Number.isInteger(options.maxBatchVisits) ? Math.min(options.maxBatchVisits, 10) : 10;
     const captureScreenshots = visitCount === 1 ? true : Boolean(options.captureScreenshots);
 
-    // Launch browser optimized for speed but with JS support
+    // Launch browser optimized for speed but with JS support and memory limits
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -1134,19 +1147,49 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
         '--no-default-browser-check',
         '--disable-extensions',
         '--disable-plugins',
-        '--js-flags=--max-old-space-size=4096'
-        // Removed --disable-images to allow analytics tracking pixels
+        '--js-flags=--max-old-space-size=2048' // Reduced from 4096 to limit memory
       ]
     });
-
-    const visits = [];
-    let completedCount = 0;
-    let successfulCount = 0;
-    let failureCount = 0;
 
     console.log(`\n⚡ STORM MODE: Processing ${visitCount} visits with batch size ${maxBatchVisits}`);
     const totalChunks = Math.ceil(visitCount / maxBatchVisits);
     console.log(`📊 Total chunks: ${totalChunks}`);
+    
+    // FIXED: Restart browser every 5 chunks to prevent memory leak
+    const chunksBeforeRestart = 5;
+    let chunkCountSinceRestart = 0;
+    
+    const visits = [];
+    let completedCount = 0;
+    let successfulCount = 0;
+    let failureCount = 0;
+    
+    // FIXED: Add progress lock to prevent race conditions with concurrent updates
+    let progressLock = false;
+    const progressQueue = [];
+    
+    const safeOnProgress = (data) => {
+      if (!onProgress) return;
+      
+      if (progressLock) {
+        // Queue the update if lock is held
+        progressQueue.push(data);
+        return;
+      }
+      
+      progressLock = true;
+      try {
+        onProgress(data);
+      } finally {
+        progressLock = false;
+        // Process any queued updates
+        if (progressQueue.length > 0) {
+          const latest = progressQueue.pop(); // Only process the latest
+          progressQueue.length = 0; // Clear queue
+          safeOnProgress(latest);
+        }
+      }
+    };
 
     // Process visits in chunks - NO delays between chunks
     for (let chunkStart = 0; chunkStart < visitCount; chunkStart += maxBatchVisits) {
@@ -1155,6 +1198,35 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
       const currentChunkNumber = Math.floor(chunkStart / maxBatchVisits) + 1;
       
       console.log(`\n🌪️ Storm chunk ${currentChunkNumber}/${totalChunks} (${chunkSize} visits)`);
+      
+      // FIXED: Restart browser periodically to prevent memory exhaustion
+      chunkCountSinceRestart++;
+      if (chunkCountSinceRestart >= chunksBeforeRestart && chunkStart > 0) {
+        console.log('🔄 Restarting browser to free memory...');
+        try {
+          await browser.close().catch(() => {});
+          await new Promise(resolve => setTimeout(resolve, 500)); // Brief pause
+          browser = await chromium.launch({
+            headless: true,
+            args: [
+              '--no-sandbox',
+              '--disable-setuid-sandbox',
+              '--disable-web-security',
+              '--disable-features=IsolateOrigins,site-per-process',
+              '--disable-dev-shm-usage',
+              '--no-first-run',
+              '--no-default-browser-check',
+              '--disable-extensions',
+              '--disable-plugins',
+              '--js-flags=--max-old-space-size=2048'
+            ]
+          });
+          console.log('✅ Browser restarted successfully');
+        } catch (error) {
+          console.error('❌ Browser restart failed:', error.message);
+        }
+        chunkCountSinceRestart = 0;
+      }
       
       // NO delay between chunks in storm mode
 
@@ -1175,7 +1247,7 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
           
           if (onProgress) {
             const remaining = visitCount - completedCount;
-            onProgress({ completed: successfulCount, remaining, failed: failureCount });
+            safeOnProgress({ completed: successfulCount, remaining, failed: failureCount });
           }
           
           return result;
@@ -1187,7 +1259,7 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
           
           if (onProgress) {
             const remaining = visitCount - completedCount;
-            onProgress({ completed: successfulCount, remaining, failed: failureCount });
+            safeOnProgress({ completed: successfulCount, remaining, failed: failureCount });
           }
           
           return {
@@ -1206,6 +1278,12 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
       visits.push(...chunkResults);
       
       console.log(`\n✅ Storm chunk ${currentChunkNumber} complete: ${chunkResults.filter(r => r.success).length}/${chunkSize} successful`);
+      
+      // FIXED: Force garbage collection hint and brief pause between chunks
+      if (global.gc) {
+        global.gc();
+      }
+      await new Promise(resolve => setTimeout(resolve, 100)); // 100ms pause between chunks
     }
 
     const successes = visits.filter(v => v.success).length;
@@ -1255,98 +1333,104 @@ async function automateStormTraffic(url, options = {}, onProgress = null) {
 async function runStormVisit({ url, userAgent, browser, captureScreenshot }) {
   const visitStartTime = Date.now();
 
-  const context = await browser.newContext({
-    userAgent,
-    viewport: { width: 1920, height: 1080 },
-    // Enable JavaScript execution for analytics tracking
-    javaScriptEnabled: true,
-    // Set realistic headers
-    extraHTTPHeaders: {
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1'
-    }
-  });
-
+  // FIXED: Add browser crash detection
   try {
-    const page = await context.newPage();
-    
-    // Allow time for JavaScript and analytics to execute
-    let response;
+    const context = await browser.newContext({
+      userAgent,
+      viewport: { width: 1920, height: 1080 },
+      // Enable JavaScript execution for analytics tracking
+      javaScriptEnabled: true,
+      // Set realistic headers
+      extraHTTPHeaders: {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+      }
+    });
+
     try {
-      response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 10000
-      });
-      // Wait for network idle to ensure JS and analytics scripts load
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    } catch (error) {
-      // Fallback to load if domcontentloaded fails
-      response = await page.goto(url, {
-        waitUntil: 'load',
-        timeout: 15000
-      }).catch(() => null);
+      const page = await context.newPage();
+      
+      // Allow time for JavaScript and analytics to execute
+      let response;
+      try {
+        response = await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 10000
+        });
+        // Wait for network idle to ensure JS and analytics scripts load
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      } catch (error) {
+        // Fallback to load if domcontentloaded fails
+        response = await page.goto(url, {
+          waitUntil: 'load',
+          timeout: 15000
+        }).catch(() => null);
+      }
+
+      // Additional wait for analytics scripts to execute (critical for GA tracking)
+      await page.waitForTimeout(1500);
+
+      // Capture performance metrics (fast, non-blocking)
+      const [title, screenshot, performance, ipData] = await Promise.allSettled([
+        page.title().catch(() => 'Unknown'),
+        captureScreenshot ? page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null) : Promise.resolve(null),
+        page.evaluate(() => {
+          try {
+            const perf = performance.getEntriesByType('navigation')[0];
+            // Use responseEnd for load time if loadEventEnd is not available
+            const loadTime = perf.loadEventEnd > 0 
+              ? perf.loadEventEnd - perf.startTime 
+              : perf.responseEnd - perf.startTime;
+            return {
+              loadTime: loadTime || 0,
+              ttfb: perf.responseStart - perf.requestStart || 0,
+              domReady: perf.domContentLoadedEventEnd - perf.startTime || 0
+            };
+          } catch (e) {
+            return { loadTime: 0, ttfb: 0, domReady: 0 };
+          }
+        }).catch(() => ({ loadTime: 0, ttfb: 0, domReady: 0 })),
+        page.evaluate(async () => {
+          try {
+            const res = await fetch('https://api.ipify.org?format=json', {
+              signal: AbortSignal.timeout(3000)
+            });
+            return await res.json();
+          } catch (e) {
+            return { ip: 'Unavailable' };
+          }
+        }).catch(() => ({ ip: 'Unavailable' }))
+      ]);
+
+      const statusCode = response ? response.status() : 200;
+      const visitDuration = ((Date.now() - visitStartTime) / 1000).toFixed(2);
+      
+      const perf = performance.status === 'fulfilled' ? performance.value : { loadTime: 0, ttfb: 0, domReady: 0 };
+      const visitIp = ipData.status === 'fulfilled' ? (ipData.value.ip || 'Unavailable') : 'Unavailable';
+
+      return {
+        success: true,
+        visitIndex: 0,
+        duration: visitDuration,
+        url,
+        title: title.status === 'fulfilled' ? title.value : 'Unknown',
+        screenshot: screenshot.status === 'fulfilled' && screenshot.value ? screenshot.value.toString('base64') : null,
+        loadTime: perf.loadTime || 0,
+        ttfb: perf.ttfb || 0,
+        domReady: perf.domReady || 0,
+        ip: visitIp,
+        statusCode,
+        trafficMode: 'storm'
+      };
+    } finally {
+      await context.close().catch(() => {});
     }
-
-    // Additional wait for analytics scripts to execute (critical for GA tracking)
-    await page.waitForTimeout(1500);
-
-    // Capture performance metrics (fast, non-blocking)
-    const [title, screenshot, performance, ipData] = await Promise.allSettled([
-      page.title().catch(() => 'Unknown'),
-      captureScreenshot ? page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => null) : Promise.resolve(null),
-      page.evaluate(() => {
-        try {
-          const perf = performance.getEntriesByType('navigation')[0];
-          // Use responseEnd for load time if loadEventEnd is not available
-          const loadTime = perf.loadEventEnd > 0 
-            ? perf.loadEventEnd - perf.startTime 
-            : perf.responseEnd - perf.startTime;
-          return {
-            loadTime: loadTime || 0,
-            ttfb: perf.responseStart - perf.requestStart || 0,
-            domReady: perf.domContentLoadedEventEnd - perf.startTime || 0
-          };
-        } catch (e) {
-          return { loadTime: 0, ttfb: 0, domReady: 0 };
-        }
-      }).catch(() => ({ loadTime: 0, ttfb: 0, domReady: 0 })),
-      page.evaluate(async () => {
-        try {
-          const res = await fetch('https://api.ipify.org?format=json', {
-            signal: AbortSignal.timeout(3000)
-          });
-          return await res.json();
-        } catch (e) {
-          return { ip: 'Unavailable' };
-        }
-      }).catch(() => ({ ip: 'Unavailable' }))
-    ]);
-
-    const statusCode = response ? response.status() : 200;
-    const visitDuration = ((Date.now() - visitStartTime) / 1000).toFixed(2);
-    
-    const perf = performance.status === 'fulfilled' ? performance.value : { loadTime: 0, ttfb: 0, domReady: 0 };
-    const visitIp = ipData.status === 'fulfilled' ? (ipData.value.ip || 'Unavailable') : 'Unavailable';
-
-    return {
-      success: true,
-      visitIndex: 0,
-      duration: visitDuration,
-      url,
-      title: title.status === 'fulfilled' ? title.value : 'Unknown',
-      screenshot: screenshot.status === 'fulfilled' && screenshot.value ? screenshot.value.toString('base64') : null,
-      loadTime: perf.loadTime || 0,
-      ttfb: perf.ttfb || 0,
-      domReady: perf.domReady || 0,
-      ip: visitIp,
-      statusCode,
-      trafficMode: 'storm'
-    };
-  } finally {
-    await context.close().catch(() => {});
+  } catch (contextError) {
+    // FIXED: Handle browser crash during context creation
+    throw new Error(`Browser context failed: ${contextError.message}`);
   }
 }
 

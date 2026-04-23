@@ -80,8 +80,8 @@ router.post('/automate', async (req, res) => {
 
   // Validate batch size based on mode
   const maxBatchRaw = safeOptions.maxBatchVisits;
-  const maxBatchLimit = trafficMode === 'storm' ? 100 : 20;
-  const maxBatchVisits = maxBatchRaw === undefined ? (trafficMode === 'storm' ? 20 : 5) : Number(maxBatchRaw);
+  const maxBatchLimit = trafficMode === 'storm' ? 10 : 20; // FIXED: Reduced from 100 to 10 for storm
+  const maxBatchVisits = maxBatchRaw === undefined ? (trafficMode === 'storm' ? 10 : 5) : Math.min(Number(maxBatchRaw), trafficMode === 'storm' ? 10 : maxBatchLimit);
   if (!Number.isInteger(maxBatchVisits) || maxBatchVisits < 1 || maxBatchVisits > maxBatchLimit) {
     return res.status(400).json({
       success: false,
@@ -100,28 +100,64 @@ router.post('/automate', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
   
+  // FIXED: Send initial keepalive to establish connection
+  res.write(':ok\n\n');
+  
   const startTime = Date.now();
+  
+  // FIXED: Track if connection is still alive
+  let connectionAlive = true;
+  req.on('close', () => {
+    connectionAlive = false;
+    console.log('⚠️ Client disconnected');
+  });
+  
+  req.on('error', (err) => {
+    console.error('❌ Request error:', err.message);
+    connectionAlive = false;
+  });
   
   // Progress callback function with immediate flush
   const onProgress = (progressData) => {
-    const data = `data: ${JSON.stringify({ type: 'progress', ...progressData })}\n\n`;
-    res.write(data);
-    // Force flush if possible
-    if (res.flush) {
-      res.flush();
+    if (!connectionAlive) {
+      console.log('⚠️ Cannot send progress - connection closed');
+      return;
+    }
+    
+    try {
+      const data = `data: ${JSON.stringify({ type: 'progress', ...progressData })}\n\n`;
+      res.write(data);
+      console.log(`📡 Progress sent: ${progressData.completed}/${progressData.remaining}`);
+      // Force flush if possible
+      if (res.flush) {
+        res.flush();
+      }
+    } catch (error) {
+      console.error('Error writing progress:', error.message);
+      connectionAlive = false;
     }
   };
   
-  const result = await automateWebsite(processedUrl, { ...safeOptions, visitCount, loopCount, maxBatchVisits, trafficMode, maxVisits: MAX_VISITS }, onProgress);
-  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  
-  console.log(`${'='.repeat(50)}`);
-  console.log(result.success ? `✅ Success (${duration}s)` : `❌ Failed (${duration}s)`);
-  console.log(`${'='.repeat(50)}\n`);
-  
-  // Send final result
-  res.write(`data: ${JSON.stringify({ type: 'result', data: { ...result, duration } })}\n\n`);
-  res.end();
+  try {
+    const result = await automateWebsite(processedUrl, { ...safeOptions, visitCount, loopCount, maxBatchVisits, trafficMode, maxVisits: MAX_VISITS }, onProgress);
+    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    
+    console.log(`${'='.repeat(50)}`);
+    console.log(result.success ? `✅ Success (${duration}s)` : `❌ Failed (${duration}s)`);
+    console.log(`${'='.repeat(50)}\n`);
+    
+    // Send final result
+    if (connectionAlive) {
+      res.write(`data: ${JSON.stringify({ type: 'result', data: { ...result, duration } })}\n\n`);
+      res.end();
+    }
+  } catch (error) {
+    console.error('❌ Automation error:', error.message);
+    if (connectionAlive) {
+      res.write(`data: ${JSON.stringify({ type: 'result', data: { success: false, error: error.message || 'Automation failed' } })}\n\n`);
+      res.end();
+    }
+  }
 });
 
 // Health check endpoint

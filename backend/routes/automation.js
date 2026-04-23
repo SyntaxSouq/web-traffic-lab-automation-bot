@@ -9,7 +9,43 @@
 
 const express = require('express');
 const router = express.Router();
+const dns = require('dns').promises;
+const ipaddr = require('ipaddr.js');
 const { automateWebsite } = require('../services/playwright');
+
+/**
+ * Robust SSRF validation: Resolves hostname and checks if IP is private/local.
+ */
+async function isSafeUrl(urlStr) {
+  try {
+    const url = new URL(urlStr);
+    const hostname = url.hostname;
+    
+    // 1. Basic string check for obvious local addresses
+    const blockedStrings = ['localhost', '0.0.0.0', '::1'];
+    if (blockedStrings.some(b => hostname.includes(b))) return false;
+
+    // 2. DNS Resolution to catch hidden local/private IPs
+    const addresses = await dns.resolve(hostname).catch(async () => {
+      // Fallback to lookup for some environments
+      const { address } = await dns.lookup(hostname);
+      return [address];
+    });
+
+    for (const addr of addresses) {
+      if (ipaddr.isValid(addr)) {
+        const ip = ipaddr.parse(addr);
+        const range = ip.range();
+        if (range !== 'unicast' && range !== 'public') {
+          return false; // Block private, loopback, link-local, etc.
+        }
+      }
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
 
 /**
  * URL validation helper: Ensures proper format for target websites.
@@ -43,10 +79,9 @@ router.post('/automate', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid URL format' });
   }
   
-  // Block localhost and private IPs for security
-  const blocked = ['localhost', '127.0.0.1', '0.0.0.0', '::1'];
-  if (blocked.some(b => processedUrl.includes(b))) {
-    return res.status(400).json({ success: false, error: 'Cannot access local addresses' });
+  // Robust SSRF Protection
+  if (!(await isSafeUrl(processedUrl))) {
+    return res.status(400).json({ success: false, error: 'Access to local or private addresses is restricted for security' });
   }
 
   const visitCountRaw = safeOptions.visitCount;

@@ -72,39 +72,42 @@ function App() {
         done = readerDone;
         if (value) {
           buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split('\n\n');
-          buffer = parts.pop() || '';
+          
+          // Process full lines from the buffer
+          let lines = buffer.split('\n');
+          // Keep the last partial line in the buffer
+          buffer = lines.pop() || '';
 
-          for (const part of parts) {
-            if (part.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(part.slice(6));
-                console.log('📡 Received SSE:', data.type, data);
-                if (data.type === 'progress') {
-                  const newProgress = {
-                    completed: data.completed,
-                    remaining: data.remaining,
-                    failed: data.failed,
-                    currentLoop: data.currentLoop,
-                    totalLoops: data.totalLoops
-                  };
-                  progressRef.current = newProgress;
-                  console.log('✅ Updating progress:', newProgress);
-                  setProgress(newProgress);
-                } else if (data.type === 'result') {
-                  const resultData = data.data;
-                  setResult(resultData);
-                  const newHistory = [
-                    { url, timestamp: Date.now(), title: resultData.title, success: resultData.success, visitCount: options.visitCount || 1 },
-                    ...history
-                  ].slice(0, 10);
-                  
-                  setHistory(newHistory);
-                  localStorage.setItem('history', JSON.stringify(newHistory));
-                }
-              } catch (e) {
-                console.error('Error parsing stream data', e);
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue;
+            
+            try {
+              const data = JSON.parse(trimmedLine.slice(6));
+              console.log('📡 Received SSE:', data.type, data);
+              if (data.type === 'progress') {
+                const newProgress = {
+                  completed: data.completed,
+                  remaining: data.remaining,
+                  failed: data.failed,
+                  currentLoop: data.currentLoop,
+                  totalLoops: data.totalLoops
+                };
+                progressRef.current = newProgress;
+                setProgress(newProgress);
+              } else if (data.type === 'result') {
+                const resultData = data.data;
+                setResult(resultData);
+                const newHistory = [
+                  { url, timestamp: Date.now(), title: resultData.title, success: resultData.success, visitCount: options.visitCount || 1 },
+                  ...history
+                ].slice(0, 10);
+                
+                setHistory(newHistory);
+                localStorage.setItem('history', JSON.stringify(newHistory));
               }
+            } catch (e) {
+              console.error('Error parsing stream data', e, trimmedLine);
             }
           }
         }

@@ -44,7 +44,7 @@ function URLInput({ onSubmit }) {
       return;
     }
 
-    const maxBatchLimit = trafficMode === 'storm' ? 100 : 20;
+    const maxBatchLimit = 20; // FIXED: Consistent limit of 20
     const parsedBatch = Number(maxBatch);
     if (!Number.isInteger(parsedBatch) || parsedBatch < 1 || parsedBatch > maxBatchLimit) {
       setBatchError(`Batch size must be between 1 and ${maxBatchLimit}`);
@@ -153,14 +153,6 @@ function URLInput({ onSubmit }) {
               onChange={(e) => {
                 const newMode = e.target.value;
                 setTrafficMode(newMode);
-                // Set reasonable defaults when switching modes
-                if (newMode === 'storm') {
-                  setMaxBatch('20');
-                } else if (newMode === 'search') {
-                  setMaxBatch('5');
-                } else {
-                  setMaxBatch('5');
-                }
                 if (batchError) setBatchError('');
               }}
               className="w-full px-4 py-4 rounded-xl bg-white/10 backdrop-blur-md border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all appearance-none cursor-pointer group-hover:bg-white/20 pr-10"
@@ -178,7 +170,7 @@ function URLInput({ onSubmit }) {
             <input
               type="number"
               min="1"
-              max={trafficMode === 'storm' ? 100 : 20}
+              max="20"
               step="1"
               value={maxBatch}
               onChange={(e) => {
@@ -190,7 +182,7 @@ function URLInput({ onSubmit }) {
               } text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all`}
               placeholder="Batch"
             />
-            <p className="text-gray-400 text-xs mt-2">Batch (1–{trafficMode === 'storm' ? 100 : 20})</p>
+            <p className="text-gray-400 text-xs mt-2">Batch (1–20)</p>
             {batchError && (
               <p className="text-red-400 text-sm mt-2">{batchError}</p>
             )}

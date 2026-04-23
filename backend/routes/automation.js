@@ -115,12 +115,12 @@ router.post('/automate', async (req, res) => {
 
   // Validate batch size based on mode
   const maxBatchRaw = safeOptions.maxBatchVisits;
-  const maxBatchLimit = trafficMode === 'storm' ? 10 : 20; // FIXED: Reduced from 100 to 10 for storm
-  const maxBatchVisits = maxBatchRaw === undefined ? (trafficMode === 'storm' ? 10 : 5) : Math.min(Number(maxBatchRaw), trafficMode === 'storm' ? 10 : maxBatchLimit);
+  const maxBatchLimit = 20; // FIXED: Consistent limit of 20 across all modes
+  const maxBatchVisits = maxBatchRaw === undefined ? 5 : Math.min(Number(maxBatchRaw), maxBatchLimit);
   if (!Number.isInteger(maxBatchVisits) || maxBatchVisits < 1 || maxBatchVisits > maxBatchLimit) {
     return res.status(400).json({
       success: false,
-      error: `maxBatchVisits must be an integer between 1 and ${maxBatchLimit} for ${trafficMode} mode`
+      error: `maxBatchVisits must be an integer between 1 and ${maxBatchLimit}`
     });
   }
   
